@@ -1,0 +1,19 @@
+# package directories
+node_modules
+jspm_packages
+
+# Serverless directories
+.serverless
+
+# Dynamodb
+.dynamodb
+
+# Next JS build
+.next
+
+# Webpack build
+.webpack
+
+package-lock.json
+.env
+.DS_Store
