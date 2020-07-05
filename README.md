@@ -1,218 +1,273 @@
-### So what's Next.js?
-
-Next.js it's a server-side rendering ReactJS framework. SSR it's a process of rendering a javascript client-side website into a static html and css on the server. Poor SEO is major disadvantage of a traditional ReactJS applications, that's where SSR comes in.
-
-### Benefits of SSR
-
-* Fast rendering websites.
-* Consistent SEO performance.
-
-### Why SEO?
-
-* It Increases traffic to your website.
-* It's a cost-effective marketing strategy.
-* It increases sales and leads.
+In this tutorial we are going to integrate AWS' DynamoDB into a Next.JS application we have built in the previous tutorial.
+> _`Amazon DynamoDB` is a fully managed NoSQL database service offered by Amazon Web Services (AWS)_
 
 ### Prerequisites
+* Serverless
+* Java Runtime Engine (JRE) version 6.x or newer
 
-* Node 12
-* AWS CLI
-* AWS account
-
-<p class="markdown-paragraph">In this tutorial I will build a Next.js app and deploy to a lambda function using Bitbucket pipelines. Let's set it off by creating a <a class="markdown-link" href="/blog/aws-lambda-layers">lambda layer</a>, run theses commands in your development folder:</p>
+ <p class="markdown-paragraph">Change directories to your development directory and clone <a class="markdown-link" href="/blog/running-nextjs-app-on-a-lambda-function">Nextjs app on a Lambda function</a> repo.</p>
 
 ```bash
-mkdir nextjs-aws-on-lambda-layer && cd nextjs-aws-on-lambda-layer 
-mkdir nodejs
-cd ..
-touch command.sh
-```
-
-Add these commands in a bash script:
-
-![alt text](https://nextjs-portfolio.s3.amazonaws.com/layer-shell-script.png "AWS Lambda Layers")
-
-When you run this bash script it will do the following:
-
-* Deletes an existing deployment package.
-* Changes directory to the nodejs.
-* Install packages.
-* Create a zipped deployment package.
-* Deploy that package to an S3 bucket
-* And lastly, a layer gets created.
-
-Define your s3 bucket and deployment package name inside `s3.json` file:
-
-```bash
-touch s3.json
-```
-
-![alt text](https://nextjs-portfolio.s3.amazonaws.com/s3-bucket-json.png "AWS S3 bucket")
-
-Head over to a terminal to execute our bash script:
-
-```bash
-./command.sh
-```
-
-Output:
-
-![alt text](https://nextjs-portfolio.s3.amazonaws.com/shell-script-output.png "Shell script")
-
-We will add `LayerVersionArn` value to our nextjs lambda function in the next few steps.
-
-### Next.js Lambda function
-
-In this section will create a lambda function that will depend on our existing lambda layer. Change directories to your development and run these commands:
-
-```bash
-serverless create \
---template aws-nodejs \
---path nextjs-on-a-lambda-function \
---name nextjs-aws-lambda
-```
-```bash
+git clone https://github.com/teddynted/nextjs-on-a-lambda-function.git
 cd nextjs-on-a-lambda-function
-mv handler.js index.js
-mkdir pages && cd pages
-touch index.js
-cd ..
-npm init -y
-npm i copy-webpack-plugin@5.0.4 serverless-apigw-binary@0.4.4 serverless-offline@4.1.4 serverless-webpack@5.3.1 webpack-node-externals@1.7.2 --save-dev
-touch binaryMimeTypes.js bitbucket-pipelines.yml webpack.config.js server.js
-```
-Add content to `pages/index.js`:
-
-```javascript
-export default () => (
-    <div>Next.js on AWS lambda!</div>
-)
+npm install
 ```
 
-Add wildcard binary mime type suport for AWS API Gateway `binaryMimeTypes.js`:
-```javascript
-module.exports = [
-    '*/*'
+For the purpose of running our on localhost, we need to install `serverless-dynamodb-local` plugin.
+
+```
+brew cask install java
+npm install --save-dev serverless-dynamodb-local
+```
+
+> _You also need to install `Java Runtime version` only if it's not installed._
+
+Open `serverless.yml` and add following entry to the plugins array
+
+```bash
+plugins:
+  - serverless-dynamodb-local
+```
+
+Install DynamoDB Local:
+
+```bash
+sls dynamodb install
+```
+
+## Configuration
+
+Let's configure `DynamoDb` and add a table called `posts-dev` in `serverless.yml`:
+
+### Create the Resource
+
+Add the following to `serverless.yml`, we are basically describing our posts table and defining postId attribute as our primary key. we get `TableName` value from the custom variable `${self:custom.postsTableName}` in the next section.
+
+BillingMode `PAY_PER_REQUEST` tells DynamoDB that we want to pay per request and use the On-Demand Capacity option.
+
+```yaml
+resources:
+  Resources:
+    PostsDynamoDBTable:
+      Type: 'AWS::DynamoDB::Table'
+      Properties:
+        AttributeDefinitions:
+          -
+            AttributeName: postId
+            AttributeType: S
+        KeySchema:
+          -
+            AttributeName: postId
+            KeyType: HASH
+        BillingMode: PAY_PER_REQUEST
+        TableName: ${self:custom.postsTableName}
+```
+
+Add the following custom: block to our `serverless.yml`, here we are defining a custom variable `postsTableName` that is used the above snippet and we also adding a basic configuration to our dynamodb.
+
+> _table name should match your enviroment e.g `posts-dev`, `posts-uat` etc._
+
+```yaml
+custom:
+  postsTableName: 'posts-${self:provider.stage}'
+  dynamodb:
+    stages:
+      - dev
+    start:
+      migrate: true
+      port: ${env:DYNAMODB_PORT, '8000'}
+      seed: true
+      inMemory: true
+      convertEmptyValues: true
+
+    seed:
+        dev:
+          sources:
+            - table: ${self:custom.postsTableName}
+              sources: [seeds/posts.json]
+```
+
+Add the `iamRoleStatements` property to the provider block in your `serverless.yml`, we are adding permissions to our DynamoDb  table within your account.
+
+```yaml
+provider:
+  name: aws
+  runtime: nodejs12.x
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - dynamodb:Scan
+        - 'lambda:InvokeFunction'
+      Resource:
+        - { "Fn::GetAtt": ["PostsDynamoDBTable", "Arn" ] }
+        - '*'
+        - "arn:aws:dynamodb:${self:provider.region}:*:table/*"
+  environment:
+    POSTS_TABLE: ${self:custom.postsTableName}
+    NODE_ENV: production
+    LAMBDA: true
+    STAGE: ${self:provider.stage}
+```
+
+The above `environment` variables are made available to our code under `process.env`.
+
+### Seeding DynamoDb
+
+Seeding it's a process of posting sample data into your dynamodb table, I will show you how to seed when deploying to dev environment. Let's do the following to create a sample json data.
+
+```bash
+mkdir seeds && cd seeds
+touch posts.json
+```
+
+Add this content to `posts.json`:
+
+```json
+[
+    {
+        "post_title": "Lorem Ipsum",
+        "author": "John Doe",
+        "post_category": [
+            {
+                "value": "React",
+                "label": "React"
+            }
+        ],
+        "created_at": "2020-05-23T18:54:07.157Z",
+        "post_desc": "Lorem Ipsum is simply dummy text of the printing and typesetting industry. Lorem Ipsum has been the industry's standard dummy text ever since the 1500s, when an unknown printer took a galley of type and scrambled it to make a type specimen book.",
+        "postId": "32f39119-42dd-4423-8601-2a0dae190527"
+    }
 ]
 ```
 
-#### Bitbucket
+> _Upon running `sls offline start` `posts` table will be seeded/populated with predefined json data._
 
-Add `bitbucket-pipelines.yml`:
+### Query Dynamo DB
 
-```yaml
-image: lambci/lambda:build-nodejs12.x
-
-pipelines:
-  branches:      
-     dev:
-        - step:
-           name: Deploy to TEST
-           deployment: test
-           services:
-             - docker
-           caches:
-             - node
-             - docker
-           script:
-             - export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
-             - export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
-             - git remote set-url origin ${BITBUCKET_GIT_HTTP_ORIGIN}
-             - npm i serverless -g
-             - rm -rf .next
-             - npm install
-             - npm run build
-             - sls deploy -v --stage dev
-             - git push
-```
-
-Ensure that you create a repository for this project in bitbucket and connect it to Bitbucket this project:
-
-<p align="center">
-  <img src="https://nextjs-portfolio.s3.amazonaws.com/new-bitbucket-repository.png">
-</p>
-
-* In your Bitbucket respository navigate to `repository settings > settings` and enable pipelines.
-* Set repository variables by adding your AWS `ACCESS_KEY_ID` and `SECRET_ACCESS_KEY` in `repository settings > Repository variables`.
-* Create an ssh key on your local and add it to `repository settings > access keys`.
-
-Head over to your working directory to initiate git and connect this project:
-
-```bash
-git init
-git checkout -b dev
-git remote add origin https://<username>@bitbucket.org/<username>/nextjs-on-a-lambda-function.git
-```
-
-Ensure that your branching model is setup like the image below:
-
-<p align="center">
-  <img src="https://nextjs-portfolio.s3.amazonaws.com/branching-model.png" alt="Branching model">
-</p>
-
-#### Webpack
-
-Let's add webpack functionality to bundle our lambda function.
-
-* `copy-webpack-plugin` - Copies individual files or entire directories, which already exist, to the build directory. 
-* `webpack-node-externals` - Allows you to define externals - modules that should not be bundled, e.g node_modules
+Let's get data from our dynamodb post table. Create a server directory in root of your project and add two files:
 
 ```javascript
-const slsw = require("serverless-webpack");
-const nodeExternals = require("webpack-node-externals");
-const CopyWebpackPlugin = require('copy-webpack-plugin');
+mkdir server && cd server
+touch dynamo.js postsModel.js
+```
+
+#### Model Posts Table
+
+> _postsModel.js_
+
+```javascript
+const POSTS_TABLE = process.env.POSTS_TABLE;
+const IS_OFFLINE = process.env.IS_OFFLINE;
+
+const params = {
+    TableName: POSTS_TABLE
+};
+
+const visible = ["postId", "post_title", "post_body"];
+
+const transform = v => {
+    console.log(v);
+    return Object.keys(v)
+        .filter(v => {
+            return IS_OFFLINE ? true : visible.includes(v);
+        })
+        .reduce((obj, key) => {
+            obj[key] = v[key];
+            return obj;
+        }, {});
+};
 
 module.exports = {
-  entry: slsw.lib.entries,
-  target: "node",
-  // Since 'aws-sdk' is not compatible with webpack,
-  // we exclude all node dependencies
-  externals: [nodeExternals()],
-  // Run babel on all .js files and skip those in node_modules
-  module: {
-    rules: [
-      {
-        test: /\.js$/,
-        loader: "babel-loader",
-        include: __dirname,
-        exclude: /node_modules/
-      }
-    ]
-  },
-  plugins: [
-    new CopyWebpackPlugin([
-      { copyPermissions: true, from: '.next/**' },
-      { copyPermissions: true, from: 'pages/**' },
-      { copyPermissions: true, from: 'package.json' }
-    ])
-  ]
+    params,
+    visible,
+    transform
 };
 ```
 
-#### Server
+#### DynamoDb
 
-Set up a custom express server for Next.js
+Set up DynamoDb so that we can perform operations against it.
+
+> _dynamo.js_
 
 ```javascript
-const next = require('next')
+const AWS = require("aws-sdk");
+const { IS_OFFLINE } = process.env;
+
+if( IS_OFFLINE ) {
+    AWS.config.update({
+        region: "us-east-1",
+        endpoint: "http://localhost:8000"
+    });
+}
+
+const dynamoDb = new AWS.DynamoDB.DocumentClient();
+const postsModel = require("./postsModel");
+
+exports.getPosts = () => {
+    return new Promise( async (resolve, revoke) => {
+        const params = {
+            TableName: postsModel.params.TableName,
+        }
+        dynamoDb.scan(params, (err, data) => {
+            if (err) {
+                revoke(err.message);
+            } else {
+                if( data.Items ) {
+                    resolve(data.Items);
+                } else {
+                    resolve([]);
+                }
+            }
+        });  
+    });
+};
+```
+##### Server
+
+In the root directory, edit your custom server file to add API end-point that will query DynamoDB and send back data.
+
+> _server.js_
+
+```javascript
 const express = require("express");
-const { PORT, NODE_ENV, LAMBDA } = process.env;
-const dev = NODE_ENV !== 'production'
-const port = parseInt(PORT, 10) || 5000;
-const app = next({ dev })
-const handle = app.getRequestHandler()
+const next = require("next");
+const bodyParser = require("body-parser");
+const cors = require("cors");
+const { LAMBDA, PORT, NODE_ENV } = process.env;
+const dynamo = require("./server/dynamo");
+
+const port = parseInt(PORT, 10) || 3000;
+const dev = NODE_ENV !== "production";
+const app = next({ dev });
+const handle = app.getRequestHandler();
+
+global.fetch = require("node-fetch");
 
 const createServer = () => {
     const server = express();
+    server.use(bodyParser.json({ limit: "50mb" }));
+    server.use(cors());
+    server.get("/posts", async (req, res) => {
+        try {
+            const data = await dynamo.getPosts();
+            res.status(200).json({
+                data: data
+            });
+        } catch (error) {
+            res.status(500).json(error);
+        }
+    });
     server.get("*", (req, res) => handle(req, res));
     return server;
 };
 
 const server = createServer();
+
 if (!LAMBDA) {
     app.prepare().then(() => {
         server.listen(port, err => {
-        if (err) throw err;
+            if (err) throw err;
             console.log(`Ready on http://localhost:${port}`);
         });
     });
@@ -222,152 +277,60 @@ exports.app = app;
 exports.server = server;
 ```
 
-And Edit `index.js` by adding these lines:
+##### Display data
+
+In this section we're going to initiate a call in the front-end to get us data from the back-end and display that data using **Apisauce**
+
+```bash
+npm i apisauce --save
+```
+
+Add the code below to this file _pages/index.js_:
 
 ```javascript
-'use strict';
+import React from 'react'
+import { create } from 'apisauce'
 
-const { app, server } = require("./server");
-const awsServerlessExpress = require("aws-serverless-express"); 
-const binaryMimeTypes = require("./binaryMimeTypes");
-
-exports.handler = (event, context, callback) => {  
-    app.prepare().then(() => { 
-        return awsServerlessExpress.proxy(
-            awsServerlessExpress.createServer(server, null, binaryMimeTypes), 
-            event, 
-            context
-        );   
-    }).catch(ex => {
-        console.error(ex.stack)
-        process.exit(1)
-    });
-};
-```
-
-> _`aws-serverless-express` gives us an ability to run serverless applications and REST APIs using your existing Node.js application framework, on top of AWS Lambda and Amazon API Gateway_
-
-#### Serverless
-
-Edit `serverless.yml` yaml file:
-
-```yaml
-service: nextjs
-
-plugins:
-  - serverless-webpack
-  - serverless-offline
-  - serverless-apigw-binary
-
-provider:
-  name: aws
-  runtime: nodejs12.x
-
-  environment:
-    NODE_ENV: production
-    LAMBDA: true
-    STAGE: ${self:provider.stage}
-
-functions:
-  index:
-    handler: index.handler
-    events:
-      - http: ANY /
-      - http: ANY /{proxy+}
-      - cors: true
-    layers:
-        - arn:aws:lambda:us-east-1:<account-id>:layer:dependencies-layer:1
-
-custom:
-  webpack:
-    webpackConfig: 'webpack.config.js'
-    keepOutputDirectory: false
-    includeModules: false
-    packager: 'npm'
-    excludeFiles:
-      - .serverless
-      - .webpack 
-      - .dynamodb
-
-  apigwBinary:
-    types: #list of mime-types
-      - '*/*'
-
-package:
-  individually: true
-```
-> _Add an arn to a layer in our `serverless.yml` from the output we got when we deployed our Lambda layer._
-
-### Ready to deploy?
-
-I hope you didn't get bored along the way.
-
-Before comitting and deploying code changes, edit `package.json`:
-
-```json
-{
-  "name": "nextjs-on-a-lambda-function",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "dev": "node server.js",
-    "build": "next build",
-    "start": "NODE_ENV=production node server.js"
+const api = create({
+  baseURL: "http://localhost:3000",
+  headers: { 
+      Accept: 'application/json',
+      'Content-Type': 'application/json' 
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "devDependencies": {
-    "copy-webpack-plugin": "^5.0.4",
-    "serverless-apigw-binary": "^0.4.4",
-    "serverless-offline": "^4.1.4",
-    "serverless-webpack": "^5.3.1",
-    "webpack-node-externals": "^1.7.2"
-  },
-  "dependencies": {
-    "aws-serverless-express": "^3.3.6",
-    "express": "^4.17.1",
-    "next": "^8.0.0",
-    "react": "^16.13.1",
-    "react-dom": "^16.13.1"
+  timeout: 60000
+});
+
+const fetchData = async () => await api.get('/posts')
+  .then(res => ({
+    posts: res.data,
+  }))
+  .catch(() => ({
+      posts: [],
+    }),
+  );
+
+class Index extends React.Component {
+  static async getInitialProps(ctx) {
+    const res = await fetchData();
+    const { posts } = res;
+    return { posts }
+  }
+  render() {
+      return <div>{JSON.stringify(this.props.posts)}</div>
   }
 }
+
+export default Index
 ```
 
-Let's add and commit files so that we can deploy our build bundle to `AWS S3 bucket` and push the whole code to `Bitbucket` through pipelines.
+##### Let's Run It!
+
+Run this command:
 
 ```bash
-git add .
-git commit -m 'commit message' .
-git push --set-upstream origin dev
-```
-Git push will trigger a continous deployment process:
-
-<p align="center">
-  <img src="https://nextjs-portfolio.s3.amazonaws.com/pipelines.gif" alt="Branching model">
-</p>
-
-Copy api end-point url from your bitbucket pipeline build and open it in your browser:
-
-> It should look something like `https://<api-gateway>.execute-api.us-east-1.amazonaws.com/dev`
-
-<p align="center">
-  <img src="https://nextjs-portfolio.s3.amazonaws.com/aws-api-endpoint.gif" alt="Branching model">
-</p>
-
-You might need to test your app on localhost before deploying it to AWS, that's where `serverless-offline` comes into play. 
-
-```bash
-rm -rf .next
-npm run build
 sls offline start
 ```
 
-Let's test on our `http://localhost:3000`
+And open http://localhost:3000 in a browser, You should be able to see the same result as the screenshot below:
 
-> _This `Serverless` plugin emulates `AWS` and `API Gateway` on your local machine to speed up your development cycles. To do so, it starts an HTTP server that handles the request's lifecycle like APIG does and invokes your handlers._
-
-#### Github
-
-<p class="markdown-paragraph">This project is available on <a class="markdown-link" target="_blank" href="https://github.com/teddynted/nextjs-on-a-lambda-function">github</a> for further reference.</p>
+![alt text](https://nextjs-portfolio.s3.amazonaws.com/nextjs-dynamodb-apisauce.jpg "Next.JS Data DynamoDb Query")
